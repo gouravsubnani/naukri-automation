@@ -26,6 +26,7 @@ from selenium.common.exceptions import (
     TimeoutException,
     NoSuchElementException,
     ElementClickInterceptedException,
+    StaleElementReferenceException,
 )
 from webdriver_manager.chrome import ChromeDriverManager
 
@@ -35,6 +36,8 @@ from headline_generator import generate_headline
 # Logging
 # ---------------------------------------------------------------------------
 LOG_FILE = Path(__file__).parent / "naukri_automation.log"
+SCREENSHOT_DIR = Path(__file__).parent / "screenshots"
+SCREENSHOT_DIR.mkdir(exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,8 +62,8 @@ NAUKRI_LOGIN_URL = "https://www.naukri.com/nlogin/login"
 NAUKRI_PROFILE_URL = "https://www.naukri.com/mnjuser/profile"
 
 # Timeouts (seconds)
-PAGE_LOAD_TIMEOUT = 30
-ELEMENT_WAIT = 15
+PAGE_LOAD_TIMEOUT = 60
+ELEMENT_WAIT = 20
 SHORT_WAIT = 5
 
 
@@ -93,9 +96,10 @@ def _create_driver() -> webdriver.Chrome:
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-infobars")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option("useAutomationExtension", False)
-    # Realistic user-agent
     chrome_options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -114,233 +118,406 @@ def _create_driver() -> webdriver.Chrome:
     return driver
 
 
+def _save_screenshot(driver: webdriver.Chrome, name: str) -> None:
+    """Save a screenshot for debugging purposes."""
+    try:
+        path = SCREENSHOT_DIR / f"{name}.png"
+        driver.save_screenshot(str(path))
+        logger.info("Screenshot saved: %s", path)
+    except Exception as e:
+        logger.warning("Could not save screenshot: %s", e)
+
+
+def _save_page_source(driver: webdriver.Chrome, name: str) -> None:
+    """Save page source HTML for debugging."""
+    try:
+        path = SCREENSHOT_DIR / f"{name}.html"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(driver.page_source)
+        logger.info("Page source saved: %s", path)
+    except Exception as e:
+        logger.warning("Could not save page source: %s", e)
+
+
+def _find_element_by_selectors(driver, selectors, wait_time=ELEMENT_WAIT, description="element"):
+    """Try multiple selectors to find an element. Returns the first match or None."""
+    for by, selector in selectors:
+        try:
+            element = WebDriverWait(driver, wait_time).until(
+                EC.presence_of_element_located((by, selector))
+            )
+            logger.info("Found %s using selector: %s", description, selector)
+            return element
+        except (TimeoutException, NoSuchElementException):
+            continue
+    return None
+
+
+def _find_clickable_by_selectors(driver, selectors, wait_time=ELEMENT_WAIT, description="element"):
+    """Try multiple selectors to find a clickable element. Returns the first match or None."""
+    for by, selector in selectors:
+        try:
+            element = WebDriverWait(driver, wait_time).until(
+                EC.element_to_be_clickable((by, selector))
+            )
+            logger.info("Found clickable %s using selector: %s", description, selector)
+            return element
+        except (TimeoutException, NoSuchElementException):
+            continue
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Core actions
 # ---------------------------------------------------------------------------
 
-def login(driver: webdriver.Chrome) -> None:
-    """Log in to Naukri.com."""
+def login(driver: webdriver.Chrome) -> bool:
+    """Log in to Naukri.com. Returns True on success."""
     logger.info("Navigating to Naukri login page...")
     driver.get(NAUKRI_LOGIN_URL)
-    time.sleep(3)
+    time.sleep(5)
 
-    wait = WebDriverWait(driver, ELEMENT_WAIT)
+    _save_screenshot(driver, "01_login_page")
+    _save_page_source(driver, "01_login_page")
 
-    # Enter email
+    # --- Find email field using multiple selectors ---
+    logger.info("Looking for email field...")
+    email_selectors = [
+        (By.CSS_SELECTOR, "input[type='text'][placeholder*='Email']"),
+        (By.CSS_SELECTOR, "input[type='text'][placeholder*='email']"),
+        (By.CSS_SELECTOR, "input[type='text'][placeholder*='Username']"),
+        (By.CSS_SELECTOR, "input[placeholder*='Email']"),
+        (By.CSS_SELECTOR, "input[placeholder*='email']"),
+        (By.CSS_SELECTOR, "input[id*='usernameField']"),
+        (By.CSS_SELECTOR, "input[name='username']"),
+        (By.CSS_SELECTOR, "input[name='email']"),
+        (By.XPATH, "//input[@type='text'][contains(@placeholder, 'mail')]"),
+        (By.XPATH, "//input[@type='text'][contains(@placeholder, 'Mail')]"),
+        (By.XPATH, "//form//input[@type='text']"),
+    ]
+
+    email_field = _find_element_by_selectors(driver, email_selectors, description="email field")
+    if not email_field:
+        logger.error("Could not find email input field.")
+        _save_screenshot(driver, "01_email_not_found")
+        _save_page_source(driver, "01_email_not_found")
+        # Log all visible inputs for debugging
+        inputs = driver.find_elements(By.TAG_NAME, "input")
+        for i, inp in enumerate(inputs):
+            logger.info(
+                "  Input #%d: type=%s, name=%s, id=%s, placeholder=%s",
+                i, inp.get_attribute("type"), inp.get_attribute("name"),
+                inp.get_attribute("id"), inp.get_attribute("placeholder"),
+            )
+        return False
+
     logger.info("Entering email...")
-    email_field = wait.until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, "input[placeholder='Enter your active Email ID / Username']"))
-    )
     email_field.clear()
     email_field.send_keys(NAUKRI_EMAIL)
     time.sleep(1)
 
-    # Enter password
+    # --- Find password field ---
+    logger.info("Looking for password field...")
+    password_selectors = [
+        (By.CSS_SELECTOR, "input[type='password']"),
+        (By.CSS_SELECTOR, "input[placeholder*='assword']"),
+        (By.CSS_SELECTOR, "input[name='password']"),
+        (By.XPATH, "//input[@type='password']"),
+    ]
+
+    password_field = _find_element_by_selectors(driver, password_selectors, description="password field")
+    if not password_field:
+        logger.error("Could not find password input field.")
+        _save_screenshot(driver, "02_password_not_found")
+        return False
+
     logger.info("Entering password...")
-    password_field = wait.until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='password']"))
-    )
     password_field.clear()
     password_field.send_keys(NAUKRI_PASSWORD)
     time.sleep(1)
 
-    # Click login button
+    _save_screenshot(driver, "02_credentials_entered")
+
+    # --- Find and click login button ---
+    logger.info("Looking for login button...")
+    login_selectors = [
+        (By.CSS_SELECTOR, "button[type='submit']"),
+        (By.XPATH, "//button[contains(text(), 'Login')]"),
+        (By.XPATH, "//button[contains(text(), 'login')]"),
+        (By.XPATH, "//button[contains(text(), 'Sign in')]"),
+        (By.CSS_SELECTOR, "button.loginButton"),
+        (By.CSS_SELECTOR, "input[type='submit']"),
+        (By.XPATH, "//form//button"),
+    ]
+
+    login_btn = _find_clickable_by_selectors(driver, login_selectors, description="login button")
+    if not login_btn:
+        logger.error("Could not find login button.")
+        _save_screenshot(driver, "03_login_btn_not_found")
+        return False
+
     logger.info("Clicking login button...")
-    login_btn = wait.until(
-        EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
-    )
     login_btn.click()
 
-    # Wait for login to complete (profile icon or redirect)
-    time.sleep(5)
+    # Wait for login to complete
+    time.sleep(8)
+    _save_screenshot(driver, "03_after_login_click")
 
-    # Check if login was successful by verifying the URL changed
-    if "login" in driver.current_url.lower():
-        logger.warning("Login may have failed — still on login page. Check credentials.")
-        # Try alternative: sometimes there's a CAPTCHA or OTP
-        logger.warning("If CAPTCHA/OTP is required, headless mode won't work. "
-                       "Run once in non-headless mode to handle it.")
-    else:
-        logger.info("Login successful!")
+    # Check if login was successful
+    current_url = driver.current_url.lower()
+    if "login" in current_url and "nlogin" in current_url:
+        logger.warning("Login may have failed — still on login page.")
+        logger.warning("URL: %s", driver.current_url)
+        _save_screenshot(driver, "03_login_failed")
+        _save_page_source(driver, "03_login_failed")
+        return False
+
+    logger.info("Login successful! URL: %s", driver.current_url)
+    return True
 
 
-def upload_resume(driver: webdriver.Chrome) -> None:
-    """Navigate to profile and upload/re-upload the resume."""
-    logger.info("Navigating to profile page...")
+def upload_resume(driver: webdriver.Chrome) -> bool:
+    """Navigate to profile and upload/re-upload the resume. Returns True on success."""
+    logger.info("Navigating to profile page for resume upload...")
     driver.get(NAUKRI_PROFILE_URL)
-    time.sleep(5)
+    time.sleep(8)
 
-    wait = WebDriverWait(driver, ELEMENT_WAIT)
+    _save_screenshot(driver, "04_profile_page")
+
     resume_path_abs = str(Path(RESUME_PATH).resolve())
+    logger.info("Resume path: %s", resume_path_abs)
 
     try:
-        # Naukri has a hidden file input for resume upload.
-        # Look for the file input element associated with resume upload.
+        # Look for any file input on the page (Naukri uses hidden file inputs)
         logger.info("Looking for resume upload input...")
 
-        # Try the direct file input approach first
         file_input = None
 
-        # Method 1: Find file input near the resume section
-        try:
-            file_input = driver.find_element(
-                By.CSS_SELECTOR, "input[type='file'][id='attachCV']"
+        # Try specific selectors first, then generic
+        file_selectors = [
+            "input[type='file'][id='attachCV']",
+            "input[type='file'][name='file']",
+            "input[type='file'][id*='resume']",
+            "input[type='file'][id*='cv']",
+            "input[type='file'][accept*='pdf']",
+            "input[type='file']",
+        ]
+
+        for selector in file_selectors:
+            try:
+                elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                if elements:
+                    file_input = elements[0]
+                    logger.info("Found file input with selector: %s", selector)
+                    break
+            except NoSuchElementException:
+                continue
+
+        if not file_input:
+            # Try clicking an update/upload button first to reveal the file input
+            logger.info("No file input found. Trying to click upload button first...")
+            upload_btn_selectors = [
+                (By.XPATH, "//*[contains(text(), 'Update resume')]"),
+                (By.XPATH, "//*[contains(text(), 'update resume')]"),
+                (By.XPATH, "//*[contains(text(), 'Upload Resume')]"),
+                (By.XPATH, "//*[contains(text(), 'Upload resume')]"),
+                (By.CSS_SELECTOR, "[class*='upload']"),
+                (By.CSS_SELECTOR, "[class*='UpdateResume']"),
+            ]
+
+            upload_btn = _find_clickable_by_selectors(
+                driver, upload_btn_selectors, wait_time=SHORT_WAIT, description="upload button"
             )
-        except NoSuchElementException:
-            pass
+            if upload_btn:
+                try:
+                    upload_btn.click()
+                    time.sleep(3)
+                    file_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
+                    if file_inputs:
+                        file_input = file_inputs[0]
+                        logger.info("Found file input after clicking upload button.")
+                except (ElementClickInterceptedException, StaleElementReferenceException) as e:
+                    logger.warning("Click on upload button failed: %s", e)
 
-        # Method 2: Try other common selectors
-        if file_input is None:
-            try:
-                file_input = driver.find_element(
-                    By.CSS_SELECTOR, "input[type='file'][name='file']"
-                )
-            except NoSuchElementException:
-                pass
+        if not file_input:
+            logger.error("Could not find any file upload input on the page.")
+            _save_screenshot(driver, "04_no_file_input")
+            _save_page_source(driver, "04_no_file_input")
+            return False
 
-        # Method 3: Any file input on the page
-        if file_input is None:
-            try:
-                file_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
-                if file_inputs:
-                    file_input = file_inputs[0]
-                    logger.info("Found file input element via generic selector.")
-            except NoSuchElementException:
-                pass
+        # Make the file input visible (sometimes it's hidden)
+        driver.execute_script(
+            "arguments[0].style.display = 'block'; "
+            "arguments[0].style.visibility = 'visible'; "
+            "arguments[0].style.height = '1px'; "
+            "arguments[0].style.width = '1px'; "
+            "arguments[0].style.opacity = '1';",
+            file_input,
+        )
+        time.sleep(1)
 
-        if file_input is None:
-            # Method 4: Click the "Update resume" / upload button to reveal file input
-            logger.info("No file input found directly. Trying to click update resume button...")
-            try:
-                update_btn = wait.until(
-                    EC.element_to_be_clickable(
-                        (By.XPATH, "//*[contains(text(), 'Update resume') or contains(text(), 'upload') or contains(text(), 'Upload')]")
-                    )
-                )
-                update_btn.click()
-                time.sleep(2)
-                file_input = driver.find_element(By.CSS_SELECTOR, "input[type='file']")
-            except (TimeoutException, NoSuchElementException):
-                logger.error("Could not locate resume upload element. Naukri may have changed their layout.")
-                return
-
-        # Send the file path to the input
         logger.info("Uploading resume: %s", resume_path_abs)
         file_input.send_keys(resume_path_abs)
-        time.sleep(5)
+        time.sleep(8)
 
+        _save_screenshot(driver, "05_after_upload")
         logger.info("Resume uploaded successfully!")
+        return True
 
     except Exception as e:
         logger.error("Resume upload failed: %s", e)
+        _save_screenshot(driver, "05_upload_error")
+        return False
 
 
-def update_headline(driver: webdriver.Chrome) -> None:
-    """Update the profile headline with a fresh keyword-rich tagline."""
+def update_headline(driver: webdriver.Chrome) -> bool:
+    """Update the profile headline with a fresh keyword-rich tagline. Returns True on success."""
     logger.info("Navigating to profile page for headline update...")
     driver.get(NAUKRI_PROFILE_URL)
-    time.sleep(5)
+    time.sleep(8)
 
-    wait = WebDriverWait(driver, ELEMENT_WAIT)
+    _save_screenshot(driver, "06_profile_for_headline")
+
     new_headline = generate_headline()
     logger.info("New headline: %s", new_headline)
 
     try:
-        # Find and click the edit icon/pencil near the resume headline section
+        # Find and click the edit icon near "Resume Headline"
         logger.info("Looking for headline edit button...")
 
-        # The headline section usually has an edit (pencil) icon.
-        # Try multiple selectors since Naukri changes their UI periodically.
         edit_clicked = False
 
-        # Method 1: Click the pencil icon near "Resume Headline"
-        try:
-            headline_section = driver.find_element(
-                By.XPATH, "//*[contains(@class, 'resumeHeadline')]//span[contains(@class, 'edit')]"
-            )
-            headline_section.click()
-            edit_clicked = True
-        except (NoSuchElementException, ElementClickInterceptedException):
-            pass
+        # Try multiple approaches to find the edit button
+        edit_selectors = [
+            # Direct class-based selectors
+            (By.XPATH, "//*[contains(@class, 'resumeHeadline')]//span[contains(@class, 'edit')]"),
+            (By.CSS_SELECTOR, ".resumeHeadline .editIcon"),
+            (By.CSS_SELECTOR, ".resumeHeadline .edit-icon"),
+            (By.CSS_SELECTOR, ".resumeHeadline [class*='edit']"),
+            (By.CSS_SELECTOR, "[class*='resumeHeadline'] [class*='edit']"),
+            (By.CSS_SELECTOR, "[class*='resumeHeadline'] [class*='icon']"),
+            (By.XPATH, "//*[contains(@class, 'resumeHeadline')]//span[contains(@class, 'icon')]"),
+            (By.XPATH, "//*[contains(@id, 'resumeHeadline')]//span[contains(@class, 'icon')]"),
+        ]
 
-        # Method 2: Look for edit icon with common class names
-        if not edit_clicked:
+        for by, selector in edit_selectors:
             try:
-                edit_icons = driver.find_elements(
-                    By.CSS_SELECTOR, ".resumeHeadline .editIcon, .resumeHeadline .edit-icon, .resumeHeadline [class*='edit']"
-                )
-                if edit_icons:
-                    edit_icons[0].click()
-                    edit_clicked = True
-            except (NoSuchElementException, ElementClickInterceptedException):
-                pass
-
-        # Method 3: Try by aria-label or title
-        if not edit_clicked:
-            try:
-                edit_btn = driver.find_element(
-                    By.XPATH,
-                    "//*[contains(@class, 'resumeHeadline')]//span[contains(@class, 'icon')]"
-                    " | //*[contains(@id, 'resumeHeadline')]//span[contains(@class, 'icon')]"
-                )
-                edit_btn.click()
+                element = driver.find_element(by, selector)
+                element.click()
                 edit_clicked = True
-            except (NoSuchElementException, ElementClickInterceptedException):
-                pass
+                logger.info("Clicked edit button using selector: %s", selector)
+                break
+            except (NoSuchElementException, ElementClickInterceptedException, StaleElementReferenceException):
+                continue
 
-        # Method 4: Broader search — find "Resume Headline" text, then nearby edit element
+        # Fallback: find "Resume Headline" text and look for edit icon nearby
         if not edit_clicked:
-            try:
-                headline_label = driver.find_element(
-                    By.XPATH, "//*[contains(text(), 'Resume headline') or contains(text(), 'Resume Headline')]"
-                )
-                # Look for a sibling or nearby edit icon
-                parent = headline_label.find_element(By.XPATH, "./..")
-                edit_icon = parent.find_element(By.CSS_SELECTOR, "span[class*='edit'], span[class*='icon'], a, button")
-                edit_icon.click()
-                edit_clicked = True
-            except (NoSuchElementException, ElementClickInterceptedException):
-                pass
+            logger.info("Trying to find headline section by text...")
+            headline_text_selectors = [
+                "//span[contains(text(), 'Resume headline')]",
+                "//span[contains(text(), 'Resume Headline')]",
+                "//*[contains(text(), 'Resume headline')]",
+                "//*[contains(text(), 'Resume Headline')]",
+            ]
+            for xpath in headline_text_selectors:
+                try:
+                    headline_el = driver.find_element(By.XPATH, xpath)
+                    # Look for clickable sibling or parent's child
+                    parent = headline_el.find_element(By.XPATH, "./..")
+                    clickable = parent.find_elements(By.CSS_SELECTOR, "span, a, button, [role='button']")
+                    for el in clickable:
+                        cls = el.get_attribute("class") or ""
+                        if "edit" in cls.lower() or "icon" in cls.lower() or "pencil" in cls.lower():
+                            el.click()
+                            edit_clicked = True
+                            logger.info("Clicked edit icon found near headline text.")
+                            break
+                    if edit_clicked:
+                        break
+                    # If no edit icon in parent, try grandparent
+                    grandparent = parent.find_element(By.XPATH, "./..")
+                    clickable = grandparent.find_elements(By.CSS_SELECTOR, "span, a, button, [role='button']")
+                    for el in clickable:
+                        cls = el.get_attribute("class") or ""
+                        if "edit" in cls.lower() or "icon" in cls.lower() or "pencil" in cls.lower():
+                            el.click()
+                            edit_clicked = True
+                            logger.info("Clicked edit icon found near headline text (grandparent).")
+                            break
+                    if edit_clicked:
+                        break
+                except (NoSuchElementException, ElementClickInterceptedException, StaleElementReferenceException):
+                    continue
 
         if not edit_clicked:
-            logger.error("Could not find the headline edit button. Naukri may have changed their layout.")
-            return
+            logger.error("Could not find the headline edit button.")
+            _save_screenshot(driver, "06_edit_btn_not_found")
+            _save_page_source(driver, "06_edit_btn_not_found")
+            return False
 
-        time.sleep(2)
+        time.sleep(3)
+        _save_screenshot(driver, "07_headline_edit_open")
 
-        # Find the headline textarea and update it
+        # Find the headline textarea
+        logger.info("Looking for headline textarea...")
+        textarea_selectors = [
+            (By.CSS_SELECTOR, "#resumeHeadlineTxt"),
+            (By.CSS_SELECTOR, "textarea[name*='headline']"),
+            (By.CSS_SELECTOR, ".resumeHeadline textarea"),
+            (By.CSS_SELECTOR, "[class*='resumeHeadline'] textarea"),
+            (By.CSS_SELECTOR, "textarea"),
+        ]
+
+        textarea = _find_element_by_selectors(driver, textarea_selectors, description="headline textarea")
+        if not textarea:
+            logger.error("Could not find headline textarea.")
+            _save_screenshot(driver, "07_textarea_not_found")
+            return False
+
         logger.info("Clearing old headline and typing new one...")
-        textarea = wait.until(
-            EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "textarea, .resumeHeadline textarea, #resumeHeadlineTxt, textarea[name*='headline']")
-            )
-        )
         textarea.click()
-        textarea.clear()
         time.sleep(0.5)
 
-        # Sometimes .clear() doesn't work — select all and delete
+        # Clear the textarea thoroughly
         textarea.send_keys(Keys.CONTROL, "a")
-        textarea.send_keys(Keys.DELETE)
-        time.sleep(0.5)
+        time.sleep(0.3)
+        textarea.send_keys(Keys.BACKSPACE)
+        time.sleep(0.3)
+        textarea.clear()
+        time.sleep(0.3)
 
         textarea.send_keys(new_headline)
         time.sleep(1)
 
-        # Click Save button
-        logger.info("Saving headline...")
-        save_btn = wait.until(
-            EC.element_to_be_clickable(
-                (By.XPATH, "//button[contains(text(), 'Save') or contains(text(), 'save')]")
-            )
-        )
-        save_btn.click()
-        time.sleep(3)
+        _save_screenshot(driver, "08_headline_typed")
 
+        # Click Save button
+        logger.info("Looking for save button...")
+        save_selectors = [
+            (By.XPATH, "//button[contains(text(), 'Save')]"),
+            (By.XPATH, "//button[contains(text(), 'save')]"),
+            (By.CSS_SELECTOR, "button.btn-primary"),
+            (By.CSS_SELECTOR, "button[type='submit']"),
+            (By.XPATH, "//button[contains(@class, 'save')]"),
+        ]
+
+        save_btn = _find_clickable_by_selectors(driver, save_selectors, description="save button")
+        if not save_btn:
+            logger.error("Could not find save button.")
+            _save_screenshot(driver, "08_save_not_found")
+            return False
+
+        save_btn.click()
+        time.sleep(5)
+
+        _save_screenshot(driver, "09_headline_saved")
         logger.info("Headline updated successfully!")
+        return True
 
     except Exception as e:
         logger.error("Headline update failed: %s", e)
+        _save_screenshot(driver, "09_headline_error")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -358,12 +535,21 @@ def run() -> None:
     driver = None
     try:
         driver = _create_driver()
-        login(driver)
+
+        if not login(driver):
+            logger.error("Login failed. Aborting remaining steps.")
+            return
+
         upload_resume(driver)
         update_headline(driver)
-        logger.info("All tasks completed successfully!")
+
+        logger.info("All tasks completed!")
+
     except Exception as e:
         logger.error("Automation failed with error: %s", e)
+        if driver:
+            _save_screenshot(driver, "99_fatal_error")
+            _save_page_source(driver, "99_fatal_error")
     finally:
         if driver:
             driver.quit()

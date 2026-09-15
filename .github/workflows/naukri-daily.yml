@@ -45,3 +45,11 @@ jobs:
           name: automation-log-${{ github.run_number }}
           path: naukri_automation.log
           retention-days: 7
+
+      - name: Upload screenshots for debugging
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ github.run_number }}
+          path: screenshots/
+          retention-days: 7
