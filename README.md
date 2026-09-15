@@ -82,7 +82,44 @@ This starts a loop that triggers the automation at 09:00 AM daily. Keep the term
 
 ## Scheduling (Run Daily at 9:00 AM)
 
-### Windows — Task Scheduler (recommended)
+### GitHub Actions — Cloud (recommended, no laptop needed)
+
+The repo includes a GitHub Actions workflow that runs daily at 9:00 AM IST in the cloud. Your laptop can be off, asleep, or closed — it doesn't matter.
+
+**One-time setup:**
+
+1. **Encode your resume as base64.** Run this in your terminal:
+
+   ```bash
+   # macOS / Linux
+   base64 -i /path/to/MyResume.pdf | pbcopy    # copies to clipboard (macOS)
+   base64 /path/to/MyResume.pdf                 # prints to terminal (Linux)
+
+   # Windows PowerShell
+   [Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\path\to\MyResume.pdf")) | Set-Clipboard
+   ```
+
+2. **Add these three secrets** to your GitHub repo:
+
+   Go to **repo → Settings → Secrets and variables → Actions → New repository secret** and add:
+
+   | Secret name | Value |
+   |---|---|
+   | `NAUKRI_EMAIL` | Your Naukri login email |
+   | `NAUKRI_PASSWORD` | Your Naukri password |
+   | `RESUME_BASE64` | The base64 string of your resume (from step 1) |
+
+3. **Done!** The workflow runs automatically every day at 9:00 AM IST.
+
+**To run it manually:** Go to **Actions → Naukri Daily Automation → Run workflow**.
+
+**To update your resume:** Re-encode the new file as base64 and update the `RESUME_BASE64` secret.
+
+Logs are saved as downloadable artifacts for 7 days after each run.
+
+---
+
+### Windows — Task Scheduler
 
 The most reliable way on Windows. Works even after reboots.
 
@@ -166,6 +203,8 @@ sudo systemctl start cron
 
 ```
 naukri-automation/
+├── .github/workflows/
+│   └── naukri-daily.yml     # GitHub Actions workflow (daily cloud run)
 ├── naukri_automation.py     # Main automation (login, upload, headline update)
 ├── headline_generator.py    # Generates fresh daily headlines with keywords
 ├── scheduler.py             # Scheduler (daily at 9 AM) or one-shot with --now

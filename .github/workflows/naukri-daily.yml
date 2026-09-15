@@ -1,0 +1,51 @@
+name: Naukri Daily Automation
+
+on:
+  # Runs daily at 9:00 AM IST (3:30 AM UTC)
+  schedule:
+    - cron: "30 3 * * *"
+
+  # Allow manual trigger from GitHub Actions UI
+  workflow_dispatch:
+
+jobs:
+  naukri-update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
+      - name: Create .env file from secrets
+        run: |
+          echo "NAUKRI_EMAIL=${{ secrets.NAUKRI_EMAIL }}" >> .env
+          echo "NAUKRI_PASSWORD=${{ secrets.NAUKRI_PASSWORD }}" >> .env
+          echo "RESUME_PATH=${{ github.workspace }}/resume.pdf" >> .env
+
+      - name: Decode and create resume file
+        run: |
+          echo "${{ secrets.RESUME_BASE64 }}" | base64 --decode > resume.pdf
+
+      - name: Run Naukri automation
+        run: python scheduler.py --now
+
+      - name: Upload logs as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: automation-log-${{ github.run_number }}
+          path: naukri_automation.log
+          retention-days: 7
