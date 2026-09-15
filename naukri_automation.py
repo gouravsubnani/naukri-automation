@@ -1,13 +1,17 @@
 """
 Naukri.com Automation Script
 -----------------------------
-1. Logs in to your Naukri account.
+1. Loads saved cookies to authenticate (bypasses OTP).
 2. Uploads your resume (refreshes the "last updated" timestamp).
 3. Updates your profile headline with a fresh, keyword-rich tagline.
 
 Uses Selenium with Chrome in headless mode so it can run unattended.
+
+Cookie setup (one-time):
+    python export_cookies.py
 """
 
+import json
 import os
 import sys
 import time
@@ -54,11 +58,15 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 load_dotenv()
 
-NAUKRI_EMAIL = os.getenv("NAUKRI_EMAIL")
-NAUKRI_PASSWORD = os.getenv("NAUKRI_PASSWORD")
 RESUME_PATH = os.getenv("RESUME_PATH")
 
-NAUKRI_LOGIN_URL = "https://www.naukri.com/nlogin/login"
+# Cookie sources (checked in order):
+#   1. NAUKRI_COOKIES env var (JSON string — used by GitHub Actions)
+#   2. naukri_cookies.json file (created by export_cookies.py — used locally)
+COOKIES_ENV = os.getenv("NAUKRI_COOKIES")
+COOKIES_FILE = Path(__file__).parent / "naukri_cookies.json"
+
+NAUKRI_HOME_URL = "https://www.naukri.com"
 NAUKRI_PROFILE_URL = "https://www.naukri.com/mnjuser/profile"
 
 # Timeouts (seconds)
@@ -68,23 +76,32 @@ SHORT_WAIT = 5
 
 
 def _validate_config() -> None:
-    """Make sure all required env vars are set and the resume file exists."""
-    missing = []
-    if not NAUKRI_EMAIL:
-        missing.append("NAUKRI_EMAIL")
-    if not NAUKRI_PASSWORD:
-        missing.append("NAUKRI_PASSWORD")
-    if not RESUME_PATH:
-        missing.append("RESUME_PATH")
+    """Make sure all required config is available."""
+    if not COOKIES_ENV and not COOKIES_FILE.is_file():
+        logger.error(
+            "No cookies found. Run 'python export_cookies.py' first, "
+            "or set the NAUKRI_COOKIES environment variable."
+        )
+        sys.exit(1)
 
-    if missing:
-        logger.error("Missing environment variables: %s", ", ".join(missing))
-        logger.error("Copy .env.example to .env and fill in your details.")
+    if not RESUME_PATH:
+        logger.error("RESUME_PATH not set in .env")
         sys.exit(1)
 
     if not Path(RESUME_PATH).is_file():
         logger.error("Resume file not found: %s", RESUME_PATH)
         sys.exit(1)
+
+
+def _load_cookies() -> list[dict]:
+    """Load cookies from env var or local file."""
+    if COOKIES_ENV:
+        logger.info("Loading cookies from NAUKRI_COOKIES environment variable.")
+        return json.loads(COOKIES_ENV)
+
+    logger.info("Loading cookies from %s", COOKIES_FILE)
+    with open(COOKIES_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def _create_driver() -> webdriver.Chrome:
@@ -119,7 +136,7 @@ def _create_driver() -> webdriver.Chrome:
 
 
 def _save_screenshot(driver: webdriver.Chrome, name: str) -> None:
-    """Save a screenshot for debugging purposes."""
+    """Save a screenshot for debugging."""
     try:
         path = SCREENSHOT_DIR / f"{name}.png"
         driver.save_screenshot(str(path))
@@ -171,108 +188,49 @@ def _find_clickable_by_selectors(driver, selectors, wait_time=ELEMENT_WAIT, desc
 # Core actions
 # ---------------------------------------------------------------------------
 
-def login(driver: webdriver.Chrome) -> bool:
-    """Log in to Naukri.com. Returns True on success."""
-    logger.info("Navigating to Naukri login page...")
-    driver.get(NAUKRI_LOGIN_URL)
+def login_with_cookies(driver: webdriver.Chrome) -> bool:
+    """Inject saved cookies and verify we're logged in. Returns True on success."""
+    cookies = _load_cookies()
+
+    # First navigate to Naukri so the domain is set (cookies require matching domain)
+    logger.info("Navigating to Naukri homepage to set domain...")
+    driver.get(NAUKRI_HOME_URL)
+    time.sleep(3)
+
+    # Inject each cookie
+    logger.info("Injecting %d cookies...", len(cookies))
+    for cookie in cookies:
+        # Remove fields that can cause issues
+        cookie.pop("sameSite", None)
+        cookie.pop("storeId", None)
+        cookie.pop("httpOnly", None)
+
+        # Ensure the domain matches
+        if "naukri.com" not in cookie.get("domain", ""):
+            continue
+
+        try:
+            driver.add_cookie(cookie)
+        except Exception as e:
+            logger.debug("Skipped cookie '%s': %s", cookie.get("name", "?"), e)
+
+    # Now navigate to profile to verify login
+    logger.info("Navigating to profile page to verify login...")
+    driver.get(NAUKRI_PROFILE_URL)
     time.sleep(5)
 
-    _save_screenshot(driver, "01_login_page")
-    _save_page_source(driver, "01_login_page")
+    _save_screenshot(driver, "01_after_cookie_login")
 
-    # --- Find email field using multiple selectors ---
-    logger.info("Looking for email field...")
-    email_selectors = [
-        (By.CSS_SELECTOR, "input[type='text'][placeholder*='Email']"),
-        (By.CSS_SELECTOR, "input[type='text'][placeholder*='email']"),
-        (By.CSS_SELECTOR, "input[type='text'][placeholder*='Username']"),
-        (By.CSS_SELECTOR, "input[placeholder*='Email']"),
-        (By.CSS_SELECTOR, "input[placeholder*='email']"),
-        (By.CSS_SELECTOR, "input[id*='usernameField']"),
-        (By.CSS_SELECTOR, "input[name='username']"),
-        (By.CSS_SELECTOR, "input[name='email']"),
-        (By.XPATH, "//input[@type='text'][contains(@placeholder, 'mail')]"),
-        (By.XPATH, "//input[@type='text'][contains(@placeholder, 'Mail')]"),
-        (By.XPATH, "//form//input[@type='text']"),
-    ]
-
-    email_field = _find_element_by_selectors(driver, email_selectors, description="email field")
-    if not email_field:
-        logger.error("Could not find email input field.")
-        _save_screenshot(driver, "01_email_not_found")
-        _save_page_source(driver, "01_email_not_found")
-        # Log all visible inputs for debugging
-        inputs = driver.find_elements(By.TAG_NAME, "input")
-        for i, inp in enumerate(inputs):
-            logger.info(
-                "  Input #%d: type=%s, name=%s, id=%s, placeholder=%s",
-                i, inp.get_attribute("type"), inp.get_attribute("name"),
-                inp.get_attribute("id"), inp.get_attribute("placeholder"),
-            )
-        return False
-
-    logger.info("Entering email...")
-    email_field.clear()
-    email_field.send_keys(NAUKRI_EMAIL)
-    time.sleep(1)
-
-    # --- Find password field ---
-    logger.info("Looking for password field...")
-    password_selectors = [
-        (By.CSS_SELECTOR, "input[type='password']"),
-        (By.CSS_SELECTOR, "input[placeholder*='assword']"),
-        (By.CSS_SELECTOR, "input[name='password']"),
-        (By.XPATH, "//input[@type='password']"),
-    ]
-
-    password_field = _find_element_by_selectors(driver, password_selectors, description="password field")
-    if not password_field:
-        logger.error("Could not find password input field.")
-        _save_screenshot(driver, "02_password_not_found")
-        return False
-
-    logger.info("Entering password...")
-    password_field.clear()
-    password_field.send_keys(NAUKRI_PASSWORD)
-    time.sleep(1)
-
-    _save_screenshot(driver, "02_credentials_entered")
-
-    # --- Find and click login button ---
-    logger.info("Looking for login button...")
-    login_selectors = [
-        (By.CSS_SELECTOR, "button[type='submit']"),
-        (By.XPATH, "//button[contains(text(), 'Login')]"),
-        (By.XPATH, "//button[contains(text(), 'login')]"),
-        (By.XPATH, "//button[contains(text(), 'Sign in')]"),
-        (By.CSS_SELECTOR, "button.loginButton"),
-        (By.CSS_SELECTOR, "input[type='submit']"),
-        (By.XPATH, "//form//button"),
-    ]
-
-    login_btn = _find_clickable_by_selectors(driver, login_selectors, description="login button")
-    if not login_btn:
-        logger.error("Could not find login button.")
-        _save_screenshot(driver, "03_login_btn_not_found")
-        return False
-
-    logger.info("Clicking login button...")
-    login_btn.click()
-
-    # Wait for login to complete
-    time.sleep(8)
-    _save_screenshot(driver, "03_after_login_click")
-
-    # Check if login was successful
     current_url = driver.current_url.lower()
-    if "login" in current_url and "nlogin" in current_url:
-        logger.warning("Login may have failed — still on login page.")
-        logger.warning("URL: %s", driver.current_url)
-        _save_screenshot(driver, "03_login_failed")
-        _save_page_source(driver, "03_login_failed")
+    if "login" in current_url:
+        logger.error("Cookie login failed — redirected to login page.")
+        logger.error("URL: %s", driver.current_url)
+        logger.error("Cookies may have expired. Run 'python export_cookies.py' again.")
+        _save_screenshot(driver, "01_cookie_login_failed")
+        _save_page_source(driver, "01_cookie_login_failed")
         return False
 
-    logger.info("Login successful! URL: %s", driver.current_url)
+    logger.info("Cookie login successful! URL: %s", driver.current_url)
     return True
 
 
@@ -282,13 +240,12 @@ def upload_resume(driver: webdriver.Chrome) -> bool:
     driver.get(NAUKRI_PROFILE_URL)
     time.sleep(8)
 
-    _save_screenshot(driver, "04_profile_page")
+    _save_screenshot(driver, "02_profile_page")
 
     resume_path_abs = str(Path(RESUME_PATH).resolve())
     logger.info("Resume path: %s", resume_path_abs)
 
     try:
-        # Look for any file input on the page (Naukri uses hidden file inputs)
         logger.info("Looking for resume upload input...")
 
         file_input = None
@@ -341,8 +298,8 @@ def upload_resume(driver: webdriver.Chrome) -> bool:
 
         if not file_input:
             logger.error("Could not find any file upload input on the page.")
-            _save_screenshot(driver, "04_no_file_input")
-            _save_page_source(driver, "04_no_file_input")
+            _save_screenshot(driver, "02_no_file_input")
+            _save_page_source(driver, "02_no_file_input")
             return False
 
         # Make the file input visible (sometimes it's hidden)
@@ -360,13 +317,13 @@ def upload_resume(driver: webdriver.Chrome) -> bool:
         file_input.send_keys(resume_path_abs)
         time.sleep(8)
 
-        _save_screenshot(driver, "05_after_upload")
+        _save_screenshot(driver, "03_after_upload")
         logger.info("Resume uploaded successfully!")
         return True
 
     except Exception as e:
         logger.error("Resume upload failed: %s", e)
-        _save_screenshot(driver, "05_upload_error")
+        _save_screenshot(driver, "03_upload_error")
         return False
 
 
@@ -376,20 +333,18 @@ def update_headline(driver: webdriver.Chrome) -> bool:
     driver.get(NAUKRI_PROFILE_URL)
     time.sleep(8)
 
-    _save_screenshot(driver, "06_profile_for_headline")
+    _save_screenshot(driver, "04_profile_for_headline")
 
     new_headline = generate_headline()
     logger.info("New headline: %s", new_headline)
 
     try:
-        # Find and click the edit icon near "Resume Headline"
         logger.info("Looking for headline edit button...")
 
         edit_clicked = False
 
         # Try multiple approaches to find the edit button
         edit_selectors = [
-            # Direct class-based selectors
             (By.XPATH, "//*[contains(@class, 'resumeHeadline')]//span[contains(@class, 'edit')]"),
             (By.CSS_SELECTOR, ".resumeHeadline .editIcon"),
             (By.CSS_SELECTOR, ".resumeHeadline .edit-icon"),
@@ -413,50 +368,46 @@ def update_headline(driver: webdriver.Chrome) -> bool:
         # Fallback: find "Resume Headline" text and look for edit icon nearby
         if not edit_clicked:
             logger.info("Trying to find headline section by text...")
-            headline_text_selectors = [
+            headline_text_xpaths = [
                 "//span[contains(text(), 'Resume headline')]",
                 "//span[contains(text(), 'Resume Headline')]",
                 "//*[contains(text(), 'Resume headline')]",
                 "//*[contains(text(), 'Resume Headline')]",
             ]
-            for xpath in headline_text_selectors:
+            for xpath in headline_text_xpaths:
                 try:
                     headline_el = driver.find_element(By.XPATH, xpath)
-                    # Look for clickable sibling or parent's child
-                    parent = headline_el.find_element(By.XPATH, "./..")
-                    clickable = parent.find_elements(By.CSS_SELECTOR, "span, a, button, [role='button']")
-                    for el in clickable:
-                        cls = el.get_attribute("class") or ""
-                        if "edit" in cls.lower() or "icon" in cls.lower() or "pencil" in cls.lower():
-                            el.click()
-                            edit_clicked = True
-                            logger.info("Clicked edit icon found near headline text.")
+                    # Search parent and grandparent for edit icon
+                    for ancestor_xpath in ["./..","././.."]:
+                        try:
+                            ancestor = headline_el.find_element(By.XPATH, ancestor_xpath)
+                            clickable = ancestor.find_elements(
+                                By.CSS_SELECTOR, "span, a, button, [role='button']"
+                            )
+                            for el in clickable:
+                                cls = (el.get_attribute("class") or "").lower()
+                                if any(kw in cls for kw in ("edit", "icon", "pencil")):
+                                    el.click()
+                                    edit_clicked = True
+                                    logger.info("Clicked edit icon near headline text.")
+                                    break
+                        except (NoSuchElementException, ElementClickInterceptedException):
+                            continue
+                        if edit_clicked:
                             break
-                    if edit_clicked:
-                        break
-                    # If no edit icon in parent, try grandparent
-                    grandparent = parent.find_element(By.XPATH, "./..")
-                    clickable = grandparent.find_elements(By.CSS_SELECTOR, "span, a, button, [role='button']")
-                    for el in clickable:
-                        cls = el.get_attribute("class") or ""
-                        if "edit" in cls.lower() or "icon" in cls.lower() or "pencil" in cls.lower():
-                            el.click()
-                            edit_clicked = True
-                            logger.info("Clicked edit icon found near headline text (grandparent).")
-                            break
-                    if edit_clicked:
-                        break
-                except (NoSuchElementException, ElementClickInterceptedException, StaleElementReferenceException):
+                except (NoSuchElementException, ElementClickInterceptedException):
                     continue
+                if edit_clicked:
+                    break
 
         if not edit_clicked:
             logger.error("Could not find the headline edit button.")
-            _save_screenshot(driver, "06_edit_btn_not_found")
-            _save_page_source(driver, "06_edit_btn_not_found")
+            _save_screenshot(driver, "04_edit_btn_not_found")
+            _save_page_source(driver, "04_edit_btn_not_found")
             return False
 
         time.sleep(3)
-        _save_screenshot(driver, "07_headline_edit_open")
+        _save_screenshot(driver, "05_headline_edit_open")
 
         # Find the headline textarea
         logger.info("Looking for headline textarea...")
@@ -471,7 +422,7 @@ def update_headline(driver: webdriver.Chrome) -> bool:
         textarea = _find_element_by_selectors(driver, textarea_selectors, description="headline textarea")
         if not textarea:
             logger.error("Could not find headline textarea.")
-            _save_screenshot(driver, "07_textarea_not_found")
+            _save_screenshot(driver, "05_textarea_not_found")
             return False
 
         logger.info("Clearing old headline and typing new one...")
@@ -489,7 +440,7 @@ def update_headline(driver: webdriver.Chrome) -> bool:
         textarea.send_keys(new_headline)
         time.sleep(1)
 
-        _save_screenshot(driver, "08_headline_typed")
+        _save_screenshot(driver, "06_headline_typed")
 
         # Click Save button
         logger.info("Looking for save button...")
@@ -504,19 +455,19 @@ def update_headline(driver: webdriver.Chrome) -> bool:
         save_btn = _find_clickable_by_selectors(driver, save_selectors, description="save button")
         if not save_btn:
             logger.error("Could not find save button.")
-            _save_screenshot(driver, "08_save_not_found")
+            _save_screenshot(driver, "06_save_not_found")
             return False
 
         save_btn.click()
         time.sleep(5)
 
-        _save_screenshot(driver, "09_headline_saved")
+        _save_screenshot(driver, "07_headline_saved")
         logger.info("Headline updated successfully!")
         return True
 
     except Exception as e:
         logger.error("Headline update failed: %s", e)
-        _save_screenshot(driver, "09_headline_error")
+        _save_screenshot(driver, "07_headline_error")
         return False
 
 
@@ -525,7 +476,7 @@ def update_headline(driver: webdriver.Chrome) -> bool:
 # ---------------------------------------------------------------------------
 
 def run() -> None:
-    """Run the full automation: login -> upload resume -> update headline."""
+    """Run the full automation: cookie login -> upload resume -> update headline."""
     logger.info("=" * 60)
     logger.info("Naukri Automation — Starting run")
     logger.info("=" * 60)
@@ -536,8 +487,8 @@ def run() -> None:
     try:
         driver = _create_driver()
 
-        if not login(driver):
-            logger.error("Login failed. Aborting remaining steps.")
+        if not login_with_cookies(driver):
+            logger.error("Cookie login failed. Run 'python export_cookies.py' to refresh cookies.")
             return
 
         upload_resume(driver)

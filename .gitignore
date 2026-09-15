@@ -1,5 +1,7 @@
 .env
+naukri_cookies.json
 __pycache__/
 *.pyc
 *.log
 naukri_automation.log
+screenshots/

@@ -29,13 +29,13 @@ jobs:
         with:
           chrome-version: stable
 
-      - name: Create .env file from secrets
+      - name: Create .env file
         run: |
-          echo "NAUKRI_EMAIL=${{ secrets.NAUKRI_EMAIL }}" >> .env
-          echo "NAUKRI_PASSWORD=${{ secrets.NAUKRI_PASSWORD }}" >> .env
           echo "RESUME_PATH=${{ github.workspace }}/resume/Gourav_Resume_DataEngineer.pdf" >> .env
 
       - name: Run Naukri automation
+        env:
+          NAUKRI_COOKIES: ${{ secrets.NAUKRI_COOKIES }}
         run: python scheduler.py --now
 
       - name: Upload logs as artifact
