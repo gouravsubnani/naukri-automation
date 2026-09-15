@@ -33,11 +33,7 @@ jobs:
         run: |
           echo "NAUKRI_EMAIL=${{ secrets.NAUKRI_EMAIL }}" >> .env
           echo "NAUKRI_PASSWORD=${{ secrets.NAUKRI_PASSWORD }}" >> .env
-          echo "RESUME_PATH=${{ github.workspace }}/resume.pdf" >> .env
-
-      - name: Decode and create resume file
-        run: |
-          echo "${{ secrets.RESUME_BASE64 }}" | base64 --decode > resume.pdf
+          echo "RESUME_PATH=${{ github.workspace }}/resume/Gourav_Resume_DataEngineer.pdf" >> .env
 
       - name: Run Naukri automation
         run: python scheduler.py --now
