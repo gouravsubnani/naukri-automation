@@ -8,18 +8,39 @@ Automatically uploads your resume and updates your profile headline on Naukri.co
 2. **Uploads your resume** — refreshes the "last updated" timestamp so recruiters see you as active
 3. **Updates your headline** — generates a new keyword-rich headline daily using terms like Data Engineer, STL, SnapLogic, Developer, ETL, Python, SQL, and more
 
+## Prerequisites
+
+- **Python 3.8+**
+- **Google Chrome** installed ([download here](https://www.google.com/chrome/))
+- ChromeDriver is downloaded automatically by `webdriver-manager`
+
 ## Setup
 
-### 1. Install Python dependencies
+### 1. Clone the repository
 
 ```bash
-pip install -r requirements.txt
+git clone https://github.com/gouravsubnani/naukri-automation.git
+cd naukri-automation
 ```
 
-### 2. Configure your credentials
+### 2. Install Python dependencies
 
 ```bash
+# Windows
+pip install -r requirements.txt
+
+# macOS / Linux
+pip3 install -r requirements.txt
+```
+
+### 3. Configure your credentials
+
+```bash
+# Windows
 copy .env.example .env
+
+# macOS / Linux
+cp .env.example .env
 ```
 
 Open `.env` and fill in:
@@ -27,47 +48,119 @@ Open `.env` and fill in:
 - `NAUKRI_PASSWORD` — your Naukri password
 - `RESUME_PATH` — full path to your resume PDF/DOC file
 
-### 3. Install Chrome
+Example paths:
+```
+# Windows
+RESUME_PATH=C:/Users/yourname/Documents/MyResume.pdf
 
-The script uses Chrome in headless mode. Make sure Google Chrome is installed on your machine. The ChromeDriver is downloaded automatically by `webdriver-manager`.
+# macOS
+RESUME_PATH=/Users/yourname/Documents/MyResume.pdf
+
+# Linux
+RESUME_PATH=/home/yourname/Documents/MyResume.pdf
+```
 
 ## Usage
 
 ### Run once (test it out)
 
 ```bash
-python scheduler.py --now
+python scheduler.py --now       # Windows
+python3 scheduler.py --now      # macOS / Linux
 ```
 
 ### Run the scheduler (keeps running in background)
 
 ```bash
-python scheduler.py
+python scheduler.py             # Windows
+python3 scheduler.py            # macOS / Linux
 ```
 
-This starts a loop that triggers the automation at 09:00 AM daily. Keep the terminal open (or run it as a background process).
+This starts a loop that triggers the automation at 09:00 AM daily. Keep the terminal open or run it as a background process.
 
-### Best option: Windows Task Scheduler (recommended)
+---
 
-This is the most reliable way to run daily — it works even if you restart your PC.
+## Scheduling (Run Daily at 9:00 AM)
+
+### Windows — Task Scheduler (recommended)
+
+The most reliable way on Windows. Works even after reboots.
 
 **Option A — Use the provided batch file:**
 
-1. Right-click `setup_task_scheduler.bat` and select **Run as administrator**
-2. Done! The task is created and will run daily at 9:00 AM.
+1. Right-click `setup_task_scheduler.bat` → **Run as administrator**
+2. Done! The task runs daily at 9:00 AM.
 
 **Option B — Manual setup:**
 
 1. Open **Task Scheduler** (search in Start Menu)
 2. Click **Create Basic Task**
-3. Name it: `NaukriResumeAutomation`
+3. Name: `NaukriResumeAutomation`
 4. Trigger: **Daily** at **9:00 AM**
 5. Action: **Start a program**
    - Program: `python`
-   - Arguments: `"C:\Users\gousubna\naukri-automation\scheduler.py" --now`
-   - Start in: `C:\Users\gousubna\naukri-automation`
-6. Check **Open the Properties dialog** and enable **Run whether user is logged on or not**
+   - Arguments: `"C:\Users\yourname\naukri-automation\scheduler.py" --now`
+   - Start in: `C:\Users\yourname\naukri-automation`
+6. Enable **Run whether user is logged on or not**
 7. Finish
+
+**Verify / Remove:**
+```powershell
+schtasks /query /tn "NaukriResumeAutomation"          # verify
+schtasks /delete /tn "NaukriResumeAutomation" /f       # remove
+```
+
+---
+
+### macOS — Cron Job
+
+```bash
+crontab -e
+```
+
+Add this line:
+
+```
+0 9 * * * cd /Users/yourname/naukri-automation && /usr/bin/python3 scheduler.py --now >> /Users/yourname/naukri-automation/cron.log 2>&1
+```
+
+Replace `/Users/yourname` with your actual home directory (`echo $HOME`).
+
+Verify:
+```bash
+crontab -l
+```
+
+**Important — macOS permissions:**
+
+macOS blocks cron from controlling apps by default. Grant access:
+
+1. Go to **System Settings → Privacy & Security → Full Disk Access**
+2. Click **+** and add `/usr/sbin/cron` (press Cmd+Shift+G to type the path)
+
+Without this, cron jobs may silently fail.
+
+---
+
+### Linux — Cron Job
+
+```bash
+crontab -e
+```
+
+Add this line:
+
+```
+0 9 * * * cd /home/yourname/naukri-automation && /usr/bin/python3 scheduler.py --now >> /home/yourname/naukri-automation/cron.log 2>&1
+```
+
+Make sure cron is running:
+```bash
+sudo systemctl enable cron
+sudo systemctl start cron
+```
+
+---
 
 ## File Structure
 
@@ -115,7 +208,9 @@ python headline_generator.py
 | Login fails | Check `.env` credentials. If Naukri asks for CAPTCHA/OTP, run once in non-headless mode (remove `--headless=new` in the script) to handle it manually. |
 | Resume upload fails | Make sure `RESUME_PATH` in `.env` points to an existing PDF/DOC file. |
 | Chrome not found | Install Google Chrome. The driver is managed automatically. |
-| Task Scheduler not running | Make sure Python is in your system PATH. Check Task Scheduler history for errors. |
+| Task Scheduler not running (Windows) | Make sure Python is in your system PATH. Check Task Scheduler history for errors. |
+| Cron not running (macOS) | Grant Full Disk Access to `/usr/sbin/cron` in System Settings. |
+| Cron not running (Linux) | Run `sudo systemctl start cron` and check `cron.log` for errors. |
 
 ## Notes
 
