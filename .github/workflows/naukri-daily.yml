@@ -1,9 +1,10 @@
 name: Naukri Daily Automation
 
 on:
-  # Runs daily at 9:00 AM IST (3:30 AM UTC)
+  # Runs daily at ~9:00 AM IST (3:30 AM UTC)
+  # Set 15 min early to account for GitHub Actions queue delays
   schedule:
-    - cron: "30 3 * * *"
+    - cron: "15 3 * * *"
 
   # Allow manual trigger from GitHub Actions UI
   workflow_dispatch:
